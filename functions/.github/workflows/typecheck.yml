@@ -1,5 +1,4 @@
 name: typecheck
-
 on:
   pull_request:
   push:

@@ -1,0 +1,11 @@
+{
+  "functions": { "source": "functions" },
+  "hosting": {
+    "public": "public",
+    "ignore": [],
+    "rewrites": [
+      { "source": "/api/rpcHealth", "function": "rpcHealthCheck" },
+      { "source": "/api/verifyProof", "function": "verifyProof" }
+    ]
+  },
+"emulators":{"ui":{"port":4002},"hosting":{"port":5500},"functions":{"port":5001}}}

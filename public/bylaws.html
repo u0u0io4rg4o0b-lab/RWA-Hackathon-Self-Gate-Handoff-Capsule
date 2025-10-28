@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>章程雜湊（上鏈前準備）｜RWA Housing Governance</title>
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,"Noto Sans TC",sans-serif;padding:16px}
+    .card{border:1px solid #ddd;border-radius:12px;padding:16px;max-width:900px}
+    label{display:block;margin:8px 0 4px}
+    code{user-select:all;display:block;word-break:break-all}
+  </style>
+</head>
+<body>
+  <div id="nav"></div><script src="js/nav.js"></script>
+  <h1>章程雜湊（上鏈前準備）</h1>
+
+  <div class="card">
+    <label>選擇章程檔（PDF / 任意檔）</label>
+    <input id="file" type="file"/>
+    <label>簽發者（issuer）</label>
+    <input id="issuer" value="RWA-Housing-Governance-MVP"/>
+    <label>版本代號（version，可選）</label>
+    <input id="version" placeholder="例如 v1.0 或 2024-10-12"/>
+
+    <div style="margin-top:12px">
+      <button id="btnHash">① 計算雜湊並寫入日誌</button>
+      <button id="btnExport">匯出日誌（audit_log.jsonl）</button>
+    </div>
+    <div style="margin-top:12px">SHA-256：<code id="hashOut"></code></div>
+  </div>
+
+  <!-- 共用小工具 + 行為 -->
+  <script>
+    function nowISO(){ return new Date().toISOString(); }
+    async function sha256Hex(bufOrStr){
+      const buf = (bufOrStr instanceof ArrayBuffer)? bufOrStr : new TextEncoder().encode(bufOrStr);
+      const d = await crypto.subtle.digest('SHA-256', buf);
+      return Array.from(new Uint8Array(d)).map(b=>b.toString(16).padStart(2,'0')).join('');
+    }
+    
+// JSONL helpers
+function readAudit(){
+  const raw = localStorage.getItem('audit_log_jsonl') || '';
+  if(!raw.trim()) return [];
+  return raw.trim().split('\n').filter(Boolean).map(JSON.parse);
+}
+function writeAudit(lines){
+  const txt = lines.map(JSON.stringify).join('\n');
+  localStorage.setItem('audit_log_jsonl', txt);
+}
+ async function onBylawsHash() {
+    const file = document.getElementById('file').files[0];
+    if (!file) { alert('請先選檔'); return; }
+    const version = document.getElementById('version').value.trim();
+    const issuer = (document.getElementById('issuer')?.value || 'RWA-Housing-Governance-MVP').trim();
+
+    const buf = await file.arrayBuffer();
+    const h = await sha256Hex(buf);
+    document.getElementById('hashOut').textContent = h;
+
+    const lines = readAudit();
+    const prev = lines.length ? await sha256Hex(JSON.stringify(lines[lines.length - 1])) : null;
+
+    const rec = {
+      ts: nowISO(),
+      actor: issuer,
+      action: 'BYLAWS_HASHED',
+      ref: 'bylaws:' + (version ? (version + '@' + file.name) : file.name),
+      data_hash: h,
+      prev_hash: prev,
+      record_hash: null
+    };
+    rec.record_hash = await calcRecordHash(rec);
+    lines.push(rec);
+    writeAudit(lines);
+    alert('已把章程雜湊寫入審計日誌');
+  }
+
+  function onExportLog() {
+    const lines = readAudit();
+    const blob = new Blob(lines.map(x => JSON.stringify(x) + '\n'), { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'audit_log.jsonl';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  document.getElementById('btnHash')?.addEventListener('click', onBylawsHash);
+  document.getElementById('btnExport')?.addEventListener('click', onExportLog);
+
+  </script>
+</body>
+</html>

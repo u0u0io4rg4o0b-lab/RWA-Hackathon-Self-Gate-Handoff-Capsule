@@ -4,8 +4,13 @@
     "public": "public",
     "ignore": [],
     "rewrites": [
-      { "source": "/api/rpcHealth", "function": "rpcHealthCheck" },
-      { "source": "/api/verifyProof", "function": "verifyProof" }
+      { "source": "/api/rpcHealth",  "function": "rpcHealthCheck" },
+      { "source": "/api/verifyProof","function": "verifyProof" }
     ]
   },
-"emulators":{"ui":{"port":4002},"hosting":{"port":5500},"functions":{"port":5001}}}
+  "emulators": {
+    "ui":        { "enabled": true, "port": 4001 },
+    "functions": { "port": 5001 },
+    "hosting":   { "port": 5500 }
+  }
+}

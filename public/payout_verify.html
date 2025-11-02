@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <title>撥款前核驗｜RWA Housing Governance MVP</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Noto Sans,Helvetica,Arial;margin:24px;line-height:1.6}
+    .card{border:1px solid #e5e7eb;border-radius:12px;padding:16px;margin:12px 0}
+    textarea{width:100%;min-height:100px;font-family:ui-monospace,Consolas,Menlo,monospace}
+    .ok{color:#15803d}.bad{color:#b91c1c}
+  </style>
+</head>
+<body>
+  <h1>撥款前核驗（用租約檔案對日誌）</h1>
+<!-- ====== 流程精靈（與 members.html / verify.html 同款） ====== -->
+<div class="card" id="flow-wizard">
+  <label style="margin-top:0;">我要測試哪一條驗證流程？</label>
+  <div style="display:flex;gap:12px;flex-wrap:wrap;">
+    <label><input type="radio" name="flow" value="A" checked> A：撥款前核驗（留在本頁）</label>
+    <label><input type="radio" name="flow" value="B"> B：成員 VC 發行（members.html）</label>
+    <label><input type="radio" name="flow" value="C"> C：日誌驗鏈（verify.html）</label>
+    <label><input type="radio" name="flow" value="E"> E：我還不確定（先看提示）</label>
+  </div>
+  <div class="actions" style="margin-top:12px;">
+    <button id="btnStartFlow" type="button">開始</button>
+    <span id="flowHint" class="hint"></span>
+  </div>
+</div>
+
+  <div class="card">
+    <div>
+      <label>上傳 audit_log.jsonl</label>
+      <input id="logfile" type="file" accept=".jsonl,.txt" />
+    </div>
+    <div style="margin-top:8px">
+      <label>上傳租約檔案（PDF/任何）</label>
+      <input id="leaseFile" type="file" />
+    </div>
+    <div style="margin-top:12px">
+      <button id="btnVerify">開始核驗</button>
+      <button id="btnReport" disabled>匯出核驗報告.txt</button>
+
+    </div>
+  </div>
+
+  <div class="card">
+    <p id="status">尚未核驗</p>
+    <textarea id="detail" readonly></textarea>
+  </div>
+
+  <div id="nav"></div>
+  <script src="js/nav.js"></script>
+  <script>
+(function initWizard(){
+  const start = document.getElementById('btnStartFlow');
+  const hint  = document.getElementById('flowHint');
+  if (!start) return;
+
+  start.addEventListener('click', () => {
+    const v = (document.querySelector('input[name="flow"]:checked')||{}).value || 'A';
+    if (v === 'A') {
+      // 留在本頁：給一步一步提示
+      hint.textContent = '先上傳 audit_log.jsonl + 租約檔，再按「開始核驗」。若缺 record_hash 不用擔心，本頁會逐筆重新計算驗鏈。';
+      hint.style.color = '#15803d';
+    } else if (v === 'B') {
+      // 走「成員 VC 發行」路線
+      location.href = 'members.html?guide=from_payout';
+    } else if (v === 'C') {
+      // 走「日誌驗鏈」路線
+      location.href = 'verify.html?guide=from_payout';
+    } else {
+      // E：先看說明，不跳走
+      hint.textContent = '這三條路像三條散步小徑：A=核對租約與日誌、B=先發 VC、C=只驗日誌；先想好目的再出發。';
+      hint.style.color = '#6b7280';
+    }
+  });
+
+  // 若帶 guide 參數，顯示小提示（跨頁導覽的回聲）
+  const p = new URLSearchParams(location.search).get('guide');
+  if (p) {
+    const map = {
+      from_members: '（來自成員 VC 發行）現在要把租約檔與審計日誌核對；上傳兩個檔案後，點「開始核驗」。',
+      from_verify : '（來自日誌驗鏈）現在要把租約檔的雜湊與日誌對上；上傳兩個檔案後，點「開始核驗」。'
+    };
+    if (document.getElementById('flowHint')) {
+      document.getElementById('flowHint').textContent = map[p] || '';
+    }
+  }
+})();
+
+  async function sha256HexBuf(buf){
+    const dig = await crypto.subtle.digest('SHA-256', buf);
+    return Array.from(new Uint8Array(dig)).map(b=>b.toString(16).padStart(2,'0')).join('');
+  }
+
+   function err(x){ console.error(x); alert(x); }
+  async function sha256Hex(input){
+    const ab = (input instanceof ArrayBuffer) ? input : new TextEncoder().encode(input);
+    const d = await crypto.subtle.digest('SHA-256', ab);
+    return Array.from(new Uint8Array(d)).map(b=>b.toString(16).padStart(2,'0')).join('');
+  }
+ 
+  async function hashOfPrev(rec){ return await sha256Hex(JSON.stringify(rec)); }
+  async function calcRecordHash(rec){
+    const plain = JSON.stringify({ts:rec.ts,actor:rec.actor,action:rec.action,ref:rec.ref,data_hash:rec.data_hash,prev_hash:rec.prev_hash});
+    return await sha256Hex(plain);
+  }
+  function looksLikeLease(rec){
+    // 兼容不同命名：action/ ref 只要含 LEASE / RENT / lease 字樣就算
+    const a = String(rec.action||'').toUpperCase();
+    const r = String(rec.ref||'').toUpperCase();
+    return a.includes('LEASE') || a.includes('RENT') || r.includes('LEASE');
+  }
+
+ async function readText(fileInput) {
+    const f = fileInput.files[0];
+    if (!f) throw '請先選 audit_log.jsonl';
+    return await f.text();
+  }
+
+  function parseJsonl(text) {
+    return text.trim().split('\n').filter(Boolean).map(JSON.parse);
+  }
+
+function downloadText(name, text){
+  const blob = new Blob([text], {type:'text/plain'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+  document.getElementById('btnVerify').addEventListener('click', async () => {
+    try {
+      // 1) 讀入審計日誌
+      const logText = await readText(document.getElementById('logfile'));
+      const rows = parseJsonl(logText);
+
+      // 2) 讀入租約檔案並算 hash
+      const lease = document.getElementById('leaseFile').files[0];
+      if (!lease) { alert('請先選租約檔'); return; }
+      const buf = await lease.arrayBuffer();
+      const h = await sha256Hex(buf);
+      const ref = 'lease:' + lease.name;
+
+      // 3) 驗證：是否存在一筆「LEASE_HASHED + ref + data_hash==h」
+      const hit = rows.some(r => r.action === 'LEASE_HASHED' && r.ref === ref && r.data_hash === h);
+
+if (!hit) {
+  const maybe = rows.filter(r => looksLikeLease(r));
+  if (maybe.length) {
+    console.warn('日誌裡有 Lease 類型，但檔名或雜湊不吻合，請確認上傳的是正確檔案。');
+  }
+}
+
+
+      // 4) 逐筆檢查鏈 prev_hash / record_hash
+      const tbody = document.querySelector('#result tbody');
+      tbody.innerHTML = '';
+      let chainOK = true;
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
+        const prev = i ? await hashOfPrev(rows[i-1]) : null;   // ←重點
+const prev_ok = (r.prev_hash ?? null) === (prev ?? null);
+
+const want = await calcRecordHash(r);                        // ←同一公式
+const rec_ok = r.record_hash === want;
+
+        chainOK = chainOK && prev_ok && rec_ok;
+
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${i + 1}</td>
+          <td>${r.action}</td>
+          <td>${r.ref}</td>
+          <td>${prev_ok ? '✔️' : '❌'}</td>
+          <td>${rec_ok ? '✔️' : '❌'}</td>`;
+        tbody.appendChild(tr);
+      }
+document.getElementById('status').textContent = chainOK ? '核驗通過 ✅' : '核驗失敗 ❌';
+      document.getElementById('detail').value =
+        `ref: ${ref}\nSHA-256: ${h}\n找到對應記錄: ${hit ? 'YES' : 'NO'}`;
+      document.getElementById('summary').textContent =
+        (chainOK ? '整本驗鎖通過 ✅' : '整本驗鎖失敗 ❌') + `（共 ${rows.length} 筆）`;
+   // 在新監聽器內部核驗完成後
+const linesOut = [];
+linesOut.push(`[核驗時間] ${new Date().toISOString()}`);
+linesOut.push(`[租約檔名] ${lease.name}`);
+linesOut.push(`[SHA-256] ${h}`);
+linesOut.push(`[是否命中 LEASE_HASHED] ${hit ? 'YES' : 'NO'}`);
+linesOut.push(`[鏈條總結] ${chainOK ? '通過' : '失敗'}（共 ${rows.length} 筆）`);
+linesOut.push(`\n# 逐筆檢查`);
+for (let i = 0; i < rows.length; i++) {
+  const r = rows[i];
+const prev = i ? await hashOfPrev(rows[i-1]) : null;
+  const prev_ok = (r.prev_hash || null) === (prev || null);
+const want = await calcRecordHash(r);
+  const rec_ok = r.record_hash === want;
+  linesOut.push(`${i+1}. action=${r.action} ref=${r.ref} prev_hash:${prev_ok?'OK':'BAD'} record_hash:${rec_ok?'OK':'BAD'}`);
+}
+document.getElementById('btnReport').disabled = false;
+document.getElementById('btnReport').onclick = () => downloadText(`verify_${lease.name}.txt`, linesOut.join('\n'));
+  
+    } catch (e) {
+      alert(e);
+    }
+});
+  </script>
+  <div style="margin-top:12px">驗證摘要：<strong id="summary">尚未驗證</strong></div>
+<table id="result" border="1" style="margin-top:8px;border-collapse:collapse">
+  <thead>
+    <tr>
+      <th>#</th><th>action</th><th>ref</th><th>prev_hash ✔</th><th>record_hash ✔</th>
+    </tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
+</body>
+</html>
